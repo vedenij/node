@@ -255,17 +255,14 @@ class WorkerEngine:
                         logger.warning(f"vLLM status error (retry {retry_count}/5): {e}")
                         continue
 
-                    total_valid = status.get("total_valid", 0)
-                    self._current_nonces = total_valid
-                    logger.info(
-                        f"vLLM status: total_valid={total_valid} target={self.target} "
-                        f"raw={status}"
-                    )
+                    stats = status.get("stats", {})
+                    total_processed = stats.get("total_processed", 0)
+                    self._current_nonces = total_processed
 
-                    if total_valid >= self.target:
+                    if total_processed >= self.target:
                         logger.info(
                             f"Target reached for {key[:16]}...: "
-                            f"{total_valid}/{self.target}"
+                            f"{total_processed}/{self.target}"
                         )
                         # Stop current generation before switching
                         await self.vllm.stop()
