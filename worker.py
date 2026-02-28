@@ -257,6 +257,10 @@ class WorkerEngine:
 
                     total_valid = status.get("total_valid", 0)
                     self._current_nonces = total_valid
+                    logger.info(
+                        f"vLLM status: total_valid={total_valid} target={self.target} "
+                        f"raw={status}"
+                    )
 
                     if total_valid >= self.target:
                         logger.info(
