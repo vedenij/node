@@ -80,11 +80,12 @@ class WorkerEngine:
 
         If already computing, stops current work first.
         """
+        # Cancel compute task WITHOUT holding lock (avoids deadlock)
+        await self._cancel_compute_task()
+
         async with self._lock:
-            # Stop current computation if any
-            if self._state == "computing":
-                logger.info("Stopping current session for new init")
-                await self._stop_internal()
+            # Stop vLLM and clear state
+            await self._cleanup_state()
 
             # Set session params
             self.block_hash = block_hash
@@ -139,23 +140,30 @@ class WorkerEngine:
         """
         Handle POST /stop. Stop everything, clear all state.
         """
+        was_computing = self._state == "computing"
+
+        # Cancel compute task WITHOUT holding lock (avoids deadlock)
+        await self._cancel_compute_task()
+
         async with self._lock:
-            was_computing = self._state == "computing"
-            await self._stop_internal()
+            await self._cleanup_state()
             logger.info(f"Stopped. was_computing={was_computing}")
 
         return {"status": "ok", "was_computing": was_computing}
 
-    async def _stop_internal(self):
-        """Internal stop logic. Caller must hold lock."""
-        # Cancel compute task
+    async def _cancel_compute_task(self):
+        """Cancel the background compute task. Must be called WITHOUT lock."""
         if self._compute_task and not self._compute_task.done():
+            self._state = "idle"  # Signal loop to exit
             self._compute_task.cancel()
             try:
                 await self._compute_task
             except asyncio.CancelledError:
                 pass
+            self._compute_task = None
 
+    async def _cleanup_state(self):
+        """Stop vLLM and clear all state. Caller must hold lock."""
         # Stop vLLM generation
         try:
             await self.vllm.stop()
