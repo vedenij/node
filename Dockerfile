@@ -12,7 +12,7 @@ RUN /usr/bin/python3.12 -m pip install --no-cache-dir \
     httpx>=0.26.0
 
 # Copy node worker code
-COPY config.py models.py vllm_client.py worker.py main.py /app/
+COPY config.py models.py vllm_client.py worker.py artifact_buffer.py main.py /app/
 COPY startup.sh /app/
 RUN chmod +x /app/startup.sh
 

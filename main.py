@@ -7,12 +7,15 @@ Receives push commands from the orchestrator:
 - POST /stop     — stop computation, clear all state
 - GET  /health   — health check (includes vLLM status)
 - GET  /status   — current worker state
+
+Receives callbacks from co-located vLLM:
+- POST /generated — artifact batch (buffered and forwarded to orchestrator)
 """
 
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi import FastAPI, Depends, HTTPException, Header, Request
 
 from config import get_settings, Settings
 from models import (
@@ -26,6 +29,7 @@ from models import (
 )
 from vllm_client import VLLMClient
 from worker import WorkerEngine
+from artifact_buffer import ArtifactBuffer
 
 # Logging
 settings = get_settings()
@@ -36,8 +40,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global engine instance
+# Global instances
 engine: WorkerEngine | None = None
+buffer: ArtifactBuffer | None = None
 
 
 def verify_api_key(authorization: str = Header(default="")):
@@ -49,11 +54,12 @@ def verify_api_key(authorization: str = Header(default="")):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global engine
+    global engine, buffer
     s = get_settings()
 
     vllm = VLLMClient(s.vllm_host, s.vllm_port)
-    engine = WorkerEngine(vllm, s)
+    buffer = ArtifactBuffer()
+    engine = WorkerEngine(vllm, s, buffer)
 
     healthy = await vllm.health_check()
     if healthy:
@@ -104,6 +110,20 @@ async def stop(_=Depends(verify_api_key)):
     """Stop all computation and clear state."""
     result = await engine.stop()
     return StopResponse(**result)
+
+
+@app.post("/generated")
+async def generated(request: Request):
+    """
+    Receive artifact batch from co-located vLLM.
+
+    vLLM sends callbacks here (localhost:9000/generated).
+    The buffer stores them and forwards to orchestrator in background.
+    No data loss even if orchestrator is temporarily unreachable.
+    """
+    body = await request.body()
+    buffer.receive(body.decode())
+    return {"status": "ok"}
 
 
 @app.get("/health", response_model=HealthResponse)

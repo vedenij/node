@@ -7,6 +7,9 @@ Manages the lifecycle of continuous nonce generation:
 - Auto-switches to next key after reaching target nonces
 - Accepts new keys mid-computation without interruption
 - Cleans up on stop command
+
+vLLM callbacks go to localhost (artifact_buffer), which forwards
+to orchestrator reliably in the background. No artifact loss.
 """
 
 import asyncio
@@ -16,6 +19,7 @@ import time
 from typing import Optional
 
 from vllm_client import VLLMClient
+from artifact_buffer import ArtifactBuffer
 from config import Settings
 
 logger = logging.getLogger(__name__)
@@ -30,9 +34,10 @@ class WorkerEngine:
         computing - Actively generating nonces, processing priority queue
     """
 
-    def __init__(self, vllm: VLLMClient, settings: Settings):
+    def __init__(self, vllm: VLLMClient, settings: Settings, buffer: ArtifactBuffer):
         self.vllm = vllm
         self.settings = settings
+        self.buffer = buffer
         self._start_time = time.time()
 
         # Session params (set by /init, cleared by /stop)
@@ -71,6 +76,10 @@ class WorkerEngine:
         _, _, public_key = heapq.heappop(self._queue)
         return public_key
 
+    def _local_callback_url(self) -> str:
+        """URL for vLLM to send callbacks to (localhost worker)."""
+        return f"http://127.0.0.1:{self.settings.port}"
+
     async def init_session(self, block_hash: str, block_height: int,
                            node_id: int, node_count: int, batch_size: int,
                            target: int, callback_url: str,
@@ -100,6 +109,9 @@ class WorkerEngine:
             self._queue = []
             self._insertion_counter = 0
             self._add_to_queue(public_key, priority)
+
+            # Start artifact buffer (forwards to orchestrator)
+            self.buffer.start(callback_url)
 
             # Start computation loop
             self._state = "computing"
@@ -163,12 +175,18 @@ class WorkerEngine:
             self._compute_task = None
 
     async def _cleanup_state(self):
-        """Stop vLLM and clear all state. Caller must hold lock."""
+        """Stop vLLM, drain buffer, and clear all state. Caller must hold lock."""
         # Stop vLLM generation
         try:
             await self.vllm.stop()
         except Exception as e:
             logger.warning(f"vLLM stop error during cleanup: {e}")
+
+        # Stop buffer (drains remaining batches to orchestrator)
+        try:
+            await self.buffer.stop()
+        except Exception as e:
+            logger.warning(f"Buffer stop error: {e}")
 
         # Clear all state
         self._queue = []
@@ -196,6 +214,7 @@ class WorkerEngine:
             "queue_keys": queue_keys,
             "session_block_hash": self.block_hash[:16] + "..." if self.block_hash else None,
             "uptime_seconds": int(time.time() - self._start_time),
+            "buffer_pending": self.buffer.pending_count if self.buffer else 0,
         }
 
     async def _compute_loop(self):
@@ -224,6 +243,7 @@ class WorkerEngine:
                 logger.info(f"Starting generation for {key[:16]}... target={self.target}")
 
                 # Tell vLLM to start generating for this key
+                # callback_url points to localhost — buffer receives and forwards
                 try:
                     await self.vllm.init_generate(
                         block_hash=self.block_hash,
@@ -232,7 +252,7 @@ class WorkerEngine:
                         node_id=self.node_id,
                         node_count=self.node_count,
                         batch_size=self.batch_size,
-                        callback_url=self.callback_url,
+                        callback_url=self._local_callback_url(),
                     )
                 except Exception as e:
                     logger.error(f"vLLM init_generate failed for {key[:16]}...: {e}")
@@ -273,7 +293,7 @@ class WorkerEngine:
                     if vllm_state in ("IDLE", "STOPPED", "ERROR"):
                         logger.warning(
                             f"vLLM stopped unexpectedly ({vllm_state}) "
-                            f"for {key[:16]}... at {total_valid} nonces"
+                            f"for {key[:16]}... at {total_processed} nonces"
                         )
                         break
 
