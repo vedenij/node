@@ -284,8 +284,11 @@ class WorkerEngine:
                             f"Target reached for {key[:16]}...: "
                             f"{total_processed}/{self.target}"
                         )
-                        # Stop current generation before switching
-                        await self.vllm.stop()
+                        # Do NOT call vllm.stop() here — it kills vLLM's
+                        # internal callback buffer (up to 5s of unsent artifacts).
+                        # Instead, just break. Next init_generate will replace
+                        # current generation, and pending callbacks will flush.
+                        # If queue is empty, vLLM keeps generating but we ignore it.
                         break
 
                     # Check if vLLM stopped unexpectedly
