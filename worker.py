@@ -223,113 +223,98 @@ class WorkerEngine:
 
         Runs until queue is empty or stopped.
 
-        Key switching strategy:
-        - When target reached and queue has next key: call init_generate
-          for the next key immediately (no vllm.stop). vLLM replaces the
-          current generation atomically, and pending callbacks for the
-          old key are still delivered. Zero delay, zero artifact loss.
-        - When target reached and queue is empty: call vllm.stop and go idle.
+        Key switching: vLLM requires stop() before init_generate() (409 otherwise).
+        With POC_CALLBACK_INTERVAL_SEC=0, vLLM sends callbacks every ~100ms to
+        localhost (artifact_buffer). stop() destroys at most ~100ms of unsent
+        artifacts (0-1 nonce). artifact_buffer guarantees delivery to orchestrator.
         """
         try:
-            # Start first key
-            async with self._lock:
-                key = self._pop_next_key()
-            if key is None:
-                self._state = "idle"
-                logger.info("Queue empty, returning to idle")
-                return
-
-            self._current_key = key
-            self._current_nonces = 0
-            logger.info(f"Starting generation for {key[:16]}... target={self.target}")
-
-            try:
-                await self.vllm.init_generate(
-                    block_hash=self.block_hash,
-                    block_height=self.block_height,
-                    public_key=key,
-                    node_id=self.node_id,
-                    node_count=self.node_count,
-                    batch_size=self.batch_size,
-                    callback_url=self._local_callback_url(),
-                )
-            except Exception as e:
-                logger.error(f"vLLM init_generate failed for {key[:16]}...: {e}")
-                self._state = "idle"
-                return
-
-            # Main poll loop
-            retry_count = 0
             while self._state == "computing":
-                await asyncio.sleep(2)
+                # Get next key from queue
+                async with self._lock:
+                    key = self._pop_next_key()
+                if key is None:
+                    self._state = "idle"
+                    self._current_key = None
+                    self._current_nonces = 0
+                    logger.info("Queue empty, returning to idle")
+                    return
+
+                self._current_key = key
+                self._current_nonces = 0
+                logger.info(f"Starting generation for {key[:16]}... target={self.target}")
 
                 try:
-                    status = await self.vllm.get_status()
-                    retry_count = 0
-                except Exception as e:
-                    retry_count += 1
-                    if retry_count >= 5:
-                        logger.error(f"vLLM status unreachable after 5 retries: {e}")
-                        break
-                    logger.warning(f"vLLM status error (retry {retry_count}/5): {e}")
-                    continue
-
-                stats = status.get("stats", {})
-                total_processed = stats.get("total_processed", 0)
-                self._current_nonces = total_processed
-
-                if total_processed >= self.target:
-                    logger.info(
-                        f"Target reached for {key[:16]}...: "
-                        f"{total_processed}/{self.target}"
+                    await self.vllm.init_generate(
+                        block_hash=self.block_hash,
+                        block_height=self.block_height,
+                        public_key=key,
+                        node_id=self.node_id,
+                        node_count=self.node_count,
+                        batch_size=self.batch_size,
+                        callback_url=self._local_callback_url(),
                     )
+                except Exception as e:
+                    logger.error(f"vLLM init_generate failed for {key[:16]}...: {e}")
+                    self._state = "idle"
+                    self._current_key = None
+                    return
 
-                    # Get next key
-                    async with self._lock:
-                        next_key = self._pop_next_key()
+                # Poll until target reached or error
+                retry_count = 0
+                target_reached = False
+                while self._state == "computing":
+                    await asyncio.sleep(2)
 
-                    if next_key is not None:
-                        # Switch to next key immediately via init_generate.
-                        # vLLM replaces generation atomically — pending
-                        # callbacks for old key still get delivered.
-                        key = next_key
-                        self._current_key = key
-                        self._current_nonces = 0
-                        logger.info(f"Switching to {key[:16]}... target={self.target}")
-
-                        try:
-                            await self.vllm.init_generate(
-                                block_hash=self.block_hash,
-                                block_height=self.block_height,
-                                public_key=key,
-                                node_id=self.node_id,
-                                node_count=self.node_count,
-                                batch_size=self.batch_size,
-                                callback_url=self._local_callback_url(),
-                            )
-                        except Exception as e:
-                            logger.error(f"vLLM init_generate failed for {key[:16]}...: {e}")
-                            break
+                    try:
+                        status = await self.vllm.get_status()
                         retry_count = 0
-                    else:
-                        # Queue empty — stop vLLM and go idle
-                        await self.vllm.stop()
+                    except Exception as e:
+                        retry_count += 1
+                        if retry_count >= 5:
+                            logger.error(f"vLLM status unreachable after 5 retries: {e}")
+                            self._state = "idle"
+                            self._current_key = None
+                            return
+                        logger.warning(f"vLLM status error (retry {retry_count}/5): {e}")
+                        continue
+
+                    stats = status.get("stats", {})
+                    total_processed = stats.get("total_processed", 0)
+                    self._current_nonces = total_processed
+
+                    if total_processed >= self.target:
+                        logger.info(
+                            f"Target reached for {key[:16]}...: "
+                            f"{total_processed}/{self.target}"
+                        )
+                        target_reached = True
+                        break
+
+                    # Check if vLLM stopped unexpectedly
+                    vllm_state = status.get("status", "")
+                    if vllm_state in ("IDLE", "STOPPED", "ERROR"):
+                        logger.warning(
+                            f"vLLM stopped unexpectedly ({vllm_state}) "
+                            f"for {key[:16]}... at {total_processed} nonces"
+                        )
                         self._state = "idle"
                         self._current_key = None
-                        self._current_nonces = 0
-                        logger.info("Queue empty, returning to idle")
                         return
 
-                    continue
+                if not target_reached:
+                    # Loop exited because state changed (stop/init called)
+                    return
 
-                # Check if vLLM stopped unexpectedly
-                vllm_state = status.get("status", "")
-                if vllm_state in ("IDLE", "STOPPED", "ERROR"):
-                    logger.warning(
-                        f"vLLM stopped unexpectedly ({vllm_state}) "
-                        f"for {key[:16]}... at {total_processed} nonces"
-                    )
-                    break
+                # Target reached — stop vLLM before next key.
+                # Required: vLLM returns 409 if init_generate called while active.
+                # With POC_CALLBACK_INTERVAL_SEC=0, loss window is ~100ms (0-1 nonce).
+                try:
+                    await self.vllm.stop()
+                except Exception as e:
+                    logger.warning(f"vLLM stop error during key switch: {e}")
+
+                # Loop back → pop next key → init_generate
 
         except asyncio.CancelledError:
             logger.info("Compute loop cancelled")
