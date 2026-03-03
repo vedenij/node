@@ -61,6 +61,9 @@ class WorkerEngine:
         # Background task
         self._compute_task: Optional[asyncio.Task] = None
 
+        # Buffer for keys received before session init
+        self._pending_keys: list = []  # [(public_key, priority)]
+
         # Lock for state mutations
         self._lock = asyncio.Lock()
 
@@ -110,6 +113,14 @@ class WorkerEngine:
             self._insertion_counter = 0
             self._add_to_queue(public_key, priority)
 
+            # Apply any keys that arrived before /init
+            for pk, prio in self._pending_keys:
+                self._add_to_queue(pk, prio)
+                logger.info(f"Pending key applied: {pk[:16]}... priority={prio}")
+            if self._pending_keys:
+                logger.info(f"Applied {len(self._pending_keys)} pending keys")
+            self._pending_keys = []
+
             # Start artifact buffer (forwards to orchestrator)
             self.buffer.start(callback_url)
 
@@ -132,11 +143,12 @@ class WorkerEngine:
         """
         async with self._lock:
             if self.block_hash is None:
-                return {
-                    "status": "error",
-                    "queue_size": 0,
-                    "message": "No active session. Send /init first.",
-                }
+                self._pending_keys.append((public_key, priority))
+                logger.info(
+                    f"Key buffered (no session yet): {public_key[:16]}... "
+                    f"priority={priority} pending={len(self._pending_keys)}"
+                )
+                return {"status": "ok", "queue_size": len(self._pending_keys)}
 
             self._add_to_queue(public_key, priority)
             queue_size = len(self._queue) + (1 if self._current_key else 0)
@@ -191,6 +203,7 @@ class WorkerEngine:
         # Clear all state
         self._queue = []
         self._insertion_counter = 0
+        self._pending_keys = []
         self._current_key = None
         self._current_nonces = 0
         self._state = "idle"
