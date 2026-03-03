@@ -96,6 +96,9 @@ class WorkerEngine:
         await self._cancel_compute_task()
 
         async with self._lock:
+            # Save pending keys before cleanup wipes them
+            saved_pending = list(self._pending_keys)
+
             # Stop vLLM and clear state
             await self._cleanup_state()
 
@@ -114,12 +117,11 @@ class WorkerEngine:
             self._add_to_queue(public_key, priority)
 
             # Apply any keys that arrived before /init
-            for pk, prio in self._pending_keys:
+            for pk, prio in saved_pending:
                 self._add_to_queue(pk, prio)
                 logger.info(f"Pending key applied: {pk[:16]}... priority={prio}")
-            if self._pending_keys:
-                logger.info(f"Applied {len(self._pending_keys)} pending keys")
-            self._pending_keys = []
+            if saved_pending:
+                logger.info(f"Applied {len(saved_pending)} pending keys")
 
             # Start artifact buffer (forwards to orchestrator)
             self.buffer.start(callback_url)
