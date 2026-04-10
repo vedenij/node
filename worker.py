@@ -259,21 +259,32 @@ class WorkerEngine:
                 self._current_nonces = 0
                 logger.info(f"Starting generation for {key[:16]}... target={self.target}")
 
-                try:
-                    await self.vllm.init_generate(
-                        block_hash=self.block_hash,
-                        block_height=self.block_height,
-                        public_key=key,
-                        node_id=self.node_id,
-                        node_count=self.node_count,
-                        batch_size=self.batch_size,
-                        callback_url=self._local_callback_url(),
-                    )
-                except Exception as e:
-                    logger.error(f"vLLM init_generate failed for {key[:16]}...: {e}")
-                    self._state = "idle"
-                    self._current_key = None
-                    return
+                # Retry init_generate — vLLM may need time to free memory
+                # after aborting inference requests
+                for attempt in range(1, 21):
+                    try:
+                        await self.vllm.init_generate(
+                            block_hash=self.block_hash,
+                            block_height=self.block_height,
+                            public_key=key,
+                            node_id=self.node_id,
+                            node_count=self.node_count,
+                            batch_size=self.batch_size,
+                            callback_url=self._local_callback_url(),
+                        )
+                        break
+                    except Exception as e:
+                        if attempt < 20:
+                            logger.warning(
+                                f"vLLM init_generate failed (attempt {attempt}/20) "
+                                f"for {key[:16]}...: {e}, retrying in 0.5s..."
+                            )
+                            await asyncio.sleep(0.5)
+                        else:
+                            logger.error(f"vLLM init_generate failed after 20 attempts for {key[:16]}...: {e}")
+                            self._state = "idle"
+                            self._current_key = None
+                            return
 
                 # Poll until target reached or error
                 retry_count = 0
@@ -294,7 +305,7 @@ class WorkerEngine:
                         logger.warning(f"vLLM status error (retry {retry_count}/5): {e}")
                         continue
 
-                    stats = status.get("stats", {})
+                    stats = status.get("stats") or {}
                     total_processed = stats.get("total_processed", 0)
                     self._current_nonces = total_processed
 

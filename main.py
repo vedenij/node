@@ -80,7 +80,7 @@ app = FastAPI(title="PoC v2 Worker Node", lifespan=lifespan)
 
 @app.post("/init", response_model=InitResponse)
 async def init(req: InitRequest, _=Depends(verify_api_key)):
-    """Start a new computation session."""
+    """Start a new computation session. Aborts any active inference first."""
     result = await engine.init_session(
         block_hash=req.block_hash,
         block_height=req.block_height,
