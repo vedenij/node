@@ -12,6 +12,7 @@ Receives callbacks from co-located vLLM:
 - POST /generated — artifact batch (buffered and forwarded to orchestrator)
 """
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -43,6 +44,9 @@ logger = logging.getLogger(__name__)
 # Global instances
 engine: WorkerEngine | None = None
 buffer: ArtifactBuffer | None = None
+
+# Event to signal inference cancellation when PoC starts
+_inference_cancelled = asyncio.Event()
 
 
 def verify_api_key(authorization: str = Header(default="")):
@@ -81,6 +85,7 @@ app = FastAPI(title="PoC v2 Worker Node", lifespan=lifespan)
 @app.post("/init", response_model=InitResponse)
 async def init(req: InitRequest, _=Depends(verify_api_key)):
     """Start a new computation session. Aborts any active inference first."""
+    _inference_cancelled.set()
     result = await engine.init_session(
         block_hash=req.block_hash,
         block_height=req.block_height,
@@ -147,16 +152,41 @@ async def chat_completions_proxy(request: Request):
     """
     Proxy to vLLM /v1/chat/completions.
     Only available when worker is idle (no PoC session).
+    Cancelled immediately when PoC /init arrives.
     """
     if engine._state != "idle":
         raise HTTPException(status_code=503, detail="PoC computation in progress")
 
+    _inference_cancelled.clear()
+
     body = await request.body()
-    resp = await engine.vllm.client.post(
-        f"{engine.vllm.base_url}/v1/chat/completions",
-        content=body,
-        headers={"Content-Type": "application/json"},
-    )
+    try:
+        inference_task = asyncio.create_task(
+            engine.vllm.client.post(
+                f"{engine.vllm.base_url}/v1/chat/completions",
+                content=body,
+                headers={"Content-Type": "application/json"},
+                timeout=300.0,
+            )
+        )
+        cancel_task = asyncio.create_task(_inference_cancelled.wait())
+
+        done, _ = await asyncio.wait(
+            [inference_task, cancel_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        if cancel_task in done:
+            inference_task.cancel()
+            raise HTTPException(status_code=503, detail="Aborted: PoC computation started")
+
+        cancel_task.cancel()
+        resp = inference_task.result()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
     return Response(
         content=resp.content,
         status_code=resp.status_code,
