@@ -36,7 +36,7 @@ echo "HF cache: ${HF_HOME}"
     --tensor-parallel-size "${TP_SIZE}" \
     --trust-remote-code \
     --gpu-memory-utilization 0.85 \
-    --max-model-len 1025 \
+    --max-model-len "${MAX_MODEL_LEN:-1025}" \
     --enforce-eager \
     --load-format runai_streamer \
     --model-loader-extra-config '{"concurrency":16}' \

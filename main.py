@@ -15,7 +15,7 @@ Receives callbacks from co-located vLLM:
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Depends, HTTPException, Header, Request
+from fastapi import FastAPI, Depends, HTTPException, Header, Request, Response
 
 from config import get_settings, Settings
 from models import (
@@ -140,6 +140,28 @@ async def health():
 async def status():
     """Current worker state."""
     return StatusResponse(**engine.get_status())
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions_proxy(request: Request):
+    """
+    Proxy to vLLM /v1/chat/completions.
+    Only available when worker is idle (no PoC session).
+    """
+    if engine._state != "idle":
+        raise HTTPException(status_code=503, detail="PoC computation in progress")
+
+    body = await request.body()
+    resp = await engine.vllm.client.post(
+        f"{engine.vllm.base_url}/v1/chat/completions",
+        content=body,
+        headers={"Content-Type": "application/json"},
+    )
+    return Response(
+        content=resp.content,
+        status_code=resp.status_code,
+        media_type="application/json",
+    )
 
 
 if __name__ == "__main__":

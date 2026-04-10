@@ -27,6 +27,7 @@ ENV SEQ_LEN=1024
 # vLLM settings
 ENV VLLM_PORT=8000
 ENV VLLM_HOST=127.0.0.1
+ENV MAX_MODEL_LEN=1025
 ENV VLLM_RPC_TIMEOUT=120000
 # Send callbacks immediately (default 5s causes artifact loss on stop)
 ENV POC_CALLBACK_INTERVAL_SEC=0
