@@ -35,7 +35,7 @@ echo "HF cache: ${HF_HOME}"
     --port "${VLLM_PORT}" \
     --tensor-parallel-size "${TP_SIZE}" \
     --trust-remote-code \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}" \
     --max-model-len "${MAX_MODEL_LEN:-1025}" \
     --enforce-eager \
     --load-format runai_streamer \
