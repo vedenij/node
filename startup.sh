@@ -34,6 +34,7 @@ echo "HF cache: ${HF_HOME}"
     --host "${VLLM_HOST}" \
     --port "${VLLM_PORT}" \
     --tensor-parallel-size "${TP_SIZE}" \
+    --dtype float16 \
     --trust-remote-code \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}" \
     --max-model-len "${MAX_MODEL_LEN:-1025}" \
