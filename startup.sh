@@ -37,7 +37,6 @@ echo "HF cache: ${HF_HOME}"
     --trust-remote-code \
     --gpu-memory-utilization "${GPU_MEMORY_UTILIZATION:-0.92}" \
     --max-model-len "${MAX_MODEL_LEN:-1025}" \
-    --enforce-eager \
     --load-format runai_streamer \
     --model-loader-extra-config '{"concurrency":16}' \
     2>&1 | tee /tmp/vllm.log &
